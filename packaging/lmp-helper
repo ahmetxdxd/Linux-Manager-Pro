@@ -1,0 +1,8 @@
+#!/usr/bin/python3 -I
+# Linux Manager Pro root helper. Called through pkexec; -I ignores the user's environment.
+import sys
+
+sys.path.insert(0, "/usr/lib/linux-manager-pro")
+from lmp.helper import main  # noqa: E402
+
+sys.exit(main())

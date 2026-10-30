@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Linux Manager Pro</vendor>
+  <icon_name>linux-manager-pro</icon_name>
+
+  <action id="org.linuxmanagerpro.helper">
+    <description>Run Linux Manager Pro system operations</description>
+    <description xml:lang="tr">Linux Manager Pro sistem işlemlerini çalıştır</description>
+    <message>Linux Manager Pro needs administrator rights to change system packages or files.</message>
+    <message xml:lang="tr">Linux Manager Pro, sistem paketlerini veya dosyalarını değiştirmek için yönetici yetkisi istiyor.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/linux-manager-pro/lmp-helper</annotate>
+  </action>
+</policyconfig>

@@ -1,0 +1,9 @@
+com.github.tchx84.Flatseal=2.3.1
+org.bleachbit.BleachBit=v5.0.2
+org.blender.Blender=4.5.3
+org.gnome.Calculator=49.1
+org.godotengine.Godot=4.5
+org.kde.elisa=25.08.2
+org.mozilla.Thunderbird=144.0
+org.qbittorrent.qBittorrent=5.1.2
+org.videolan.VLC=3.0.21

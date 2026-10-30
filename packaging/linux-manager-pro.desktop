@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Linux Manager Pro
+GenericName=System Manager
+GenericName[tr]=Sistem Yöneticisi
+Comment=Uninstaller, startup and service manager, profile backup, external disk installs and native builds
+Comment[tr]=Tam kaldırıcı, başlangıç ve servis yöneticisi, profil yedekleme, harici diske kurulum ve yerel derleme
+Exec=linux-manager-pro
+Icon=linux-manager-pro
+Terminal=false
+Categories=System;Settings;PackageManager;Qt;
+Keywords=uninstall;uninstaller;autostart;startup;systemd;service;backup;profile;pacman;flatpak;compile;
+Keywords[tr]=kaldır;kaldırıcı;başlangıç;servis;yedek;profil;derle;
+StartupWMClass=linux-manager-pro

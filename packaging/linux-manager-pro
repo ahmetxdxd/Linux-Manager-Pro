@@ -1,0 +1,4 @@
+#!/bin/sh
+# Linux Manager Pro launcher
+export PYTHONPATH="/usr/lib/linux-manager-pro${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 -m lmp "$@"

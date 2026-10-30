@@ -1,0 +1,47 @@
+# Linux Manager Pro: local PKGBUILD (packages straight from the project folder)
+# Usage: ./install.sh in the project root  (or: cd packaging && makepkg -si)
+pkgname=linux-manager-pro
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="All-in-one system manager for Arch Linux: full uninstaller, startup/service manager, profile backup, external-disk installs, local builds"
+arch=('any')
+license=('MIT')
+depends=('python' 'python-pyqt6' 'polkit' 'pacman' 'util-linux' 'rsync' 'systemd')
+optdepends=(
+  'flatpak: manage Flatpak apps and install them to an external disk'
+  'pacman-contrib: smart package-cache cleaning with paccache'
+  'base-devel: makepkg and gcc for the Builder page'
+  'git: fetching sources for the Builder page'
+  'ccache: faster rebuilds'
+  'yay: install AUR packages automatically from a profile'
+  'paru: install AUR packages automatically from a profile'
+)
+source=()
+
+# install.sh sets LMP_SRC to the project root; with plain makepkg it is the parent of packaging/
+_root() { realpath "${LMP_SRC:-$startdir/..}"; }
+
+package() {
+  local root; root="$(_root)"
+  local lib="$pkgdir/usr/lib/linux-manager-pro"
+  install -dm755 "$lib"
+  cp -r --no-preserve=ownership "$root/lmp" "$lib/"
+  find "$lib" -name '__pycache__' -type d -prune -exec rm -rf {} +
+  python -m compileall -q -d /usr/lib/linux-manager-pro "$lib/lmp"
+
+  install -Dm755 "$root/packaging/lmp-helper" "$lib/lmp-helper"
+  install -Dm755 "$root/packaging/linux-manager-pro" "$pkgdir/usr/bin/linux-manager-pro"
+  install -Dm644 "$root/packaging/linux-manager-pro.desktop" \
+    "$pkgdir/usr/share/applications/linux-manager-pro.desktop"
+  install -Dm644 "$root/packaging/org.linuxmanagerpro.helper.policy" \
+    "$pkgdir/usr/share/polkit-1/actions/org.linuxmanagerpro.helper.policy"
+  install -Dm644 "$root/lmp/data/icons/linux-manager-pro.svg" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/linux-manager-pro.svg"
+  local size
+  for size in 16 22 24 32 48 64 128 256 512; do
+    install -Dm644 "$root/packaging/icons/hicolor/${size}x${size}/apps/linux-manager-pro.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/linux-manager-pro.png"
+  done
+  install -Dm644 "$root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -dm755 "$pkgdir/var/lib/linux-manager-pro"
+}
