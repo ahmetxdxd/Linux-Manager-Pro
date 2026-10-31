@@ -507,6 +507,8 @@ MESSAGES = {
         'Son açılış süresi',
     'Last modified':
         'Son değişiklik',
+    'Last time an app switched itself back on: {names} ({when}). It was switched off again.':
+        'Bir uygulamanın kendini son kez tekrar açması: {names} ({when}). Yeniden kapatıldı.',
     'Leftover files':
         'Artık dosyalar',
     'Leftover scan failed: {e}':
@@ -935,6 +937,10 @@ MESSAGES = {
         'Durum: {state}',
     'Stop':
         'Durdur',
+    'Stop it now ({unit}). Switching it off here only decides what happens at the next login.':
+        'Şimdi durdur ({unit}). Burada kapatmak yalnızca bir sonraki oturum açılışında ne olacağını belirler.',
+    'Stop {name}':
+        '{name} durdurulsun mu',
     'Stopped':
         'Durdu',
     'Stopping':
@@ -1075,6 +1081,8 @@ MESSAGES = {
         'KDE cüzdanınızı oturum açılışında açar; kayıtlı parolalar tekrar sorulabilir.',
     'Unmask':
         'Maskeyi kaldır',
+    'Unsaved work in it may be lost.':
+        'İçindeki kaydedilmemiş çalışma kaybolabilir.',
     'Up to date (local build)':
         'Güncel (yerel derleme)',
     'Update the system before installing (recommended)':
@@ -1187,10 +1195,16 @@ MESSAGES = {
         '{m} dk',
     '{name} (local build from git source)':
         '{name} (git kaynağından yerel derleme)',
+    '{name} cannot be stopped from here.':
+        '{name} buradan durdurulamaz.',
     '{name} may be required for your desktop or the system to work. Continue anyway?':
         '{name} masaüstünüzün ya da sistemin çalışması için gerekli olabilir. Yine de devam edilsin mi?',
     '{name} moved.':
         '{name} taşındı.',
+    '{name} was stopped.':
+        '{name} durduruldu.',
+    '{name} will be stopped now.':
+        '{name} şimdi durdurulacak.',
     '{name} will no longer run at login.':
         '{name} açılışta çalışmayacak.',
     '{name} will no longer run at login. It keeps running until you close it or log out.':

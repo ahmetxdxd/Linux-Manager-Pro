@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (QCheckBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QScrollArea,
                              QSpinBox, QVBoxLayout, QWidget)
@@ -89,6 +91,11 @@ class AutostartRow(QWidget):
         if item.kind == autostart.APP and item.origin == "user":
             row.addWidget(tool_button("uninstall", tr("Delete this entry"),
                                       lambda: page.remove(item)))
+        if not item.enabled and autostart.can_stop(item):
+            row.addWidget(tool_button(
+                "stop", tr("Stop it now ({unit}). Switching it off here only decides what "
+                           "happens at the next login.").format(unit=item.runner),
+                lambda: page.stop_now(item)))
         if item.other_start and not item.enabled and item.runner \
                 and autostart.unit_risk(item.runner)[0] != "block":
             row.addWidget(button(
@@ -161,6 +168,9 @@ class StartupPage(Page):
                                      "stays off, even if the app (Discord, Steam…) tries to turn "
                                      "itself back on. System files are never modified."),
                                   "small", wrap=True))
+        self.guard_note = label("", "small", wrap=True)
+        self.guard_note.setVisible(False)
+        left.body.addWidget(self.guard_note)
         self.xdg_banner = Banner(tr("Your window manager does not start application entries "
                                     "(XDG autostart) by itself; they only run if your config "
                                     "starts <b>dex</b> or you use <b>uwsm</b>. Your real start "
@@ -213,7 +223,7 @@ class StartupPage(Page):
             autostart.sync_guard()
             items = autostart.inspect_items(autostart.list_items())
             return (items, autostart.xdg_entries_run_here(), bool(autostart.disabled_snapshot()),
-                    bool(autostart.masked_by_us()))
+                    bool(autostart.masked_by_us()), autostart.guard_last())
 
         run_async(work, on_done=self._show_items, key=(id(self), "items"),
                   on_error=lambda e: self.notify(tr("Could not read startup entries: {e}").format(e=e), "error"))
@@ -227,7 +237,7 @@ class StartupPage(Page):
                 item.widget().deleteLater()
 
     def _show_items(self, result) -> None:
-        items, self._xdg_runs, can_undo, has_masked = result
+        items, self._xdg_runs, can_undo, has_masked, guard_last = result
         self.items = items
         relevant = [i for i in items if not i.desktop_mismatch]
         enabled = sum(1 for i in relevant if i.enabled)
@@ -236,6 +246,13 @@ class StartupPage(Page):
                                             for i in relevant))
         self.restore_btn.setVisible(can_undo)
         self.unmask_btn.setVisible(has_masked)
+        if guard_last:
+            when, names = guard_last
+            self.guard_note.setText(tr("Last time an app switched itself back on: {names} ({when}). "
+                                       "It was switched off again.").format(
+                names=", ".join(names[:3]) + (" …" if len(names) > 3 else ""),
+                when=datetime.fromtimestamp(when).strftime("%Y-%m-%d %H:%M")))
+        self.guard_note.setVisible(guard_last is not None)
         self.xdg_banner.setVisible(not self._xdg_runs and any(i.kind == autostart.APP
                                                               for i in relevant))
         still_started = sum(1 for i in relevant if i.other_start and not i.enabled)
@@ -342,6 +359,22 @@ class StartupPage(Page):
             self.notify(tr("Could not change it: {exc}").format(exc=exc), "error")
             return
         self.notify(tr("{unit} will no longer start at login.").format(unit=service.desktop_id), "ok")
+        self.refresh()
+
+    def stop_now(self, item) -> None:
+        _risk, note = autostart.unit_risk(item.runner)
+        if not confirm(self, tr("Stop {name}").format(name=item.name),
+                       tr("{name} will be stopped now.").format(name=item.name),
+                       informative=(tr(note) + "\n\n" if note else "")
+                       + tr("Unsaved work in it may be lost."),
+                       ok_text=tr("Stop"), danger=True):
+            return
+        try:
+            autostart.stop_now(item)
+        except (OSError, ValueError) as exc:
+            self.notify(tr("Could not change it: {exc}").format(exc=exc), "error")
+            return
+        self.notify(tr("{name} was stopped.").format(name=item.name), "ok")
         self.refresh()
 
     def restore_services(self) -> None:

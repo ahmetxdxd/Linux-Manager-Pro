@@ -136,7 +136,7 @@ def _set_app_enabled(item: AutostartItem, enabled: bool) -> None:
         raise FileNotFoundError(item.desktop_id)
     text = desktop.set_key(text, "Hidden", None if enabled else "true")
     text = desktop.set_key(text, "X-GNOME-Autostart-enabled", None if enabled else "false")
-    _remember_blocked(item.desktop_id, not enabled)
+    _remember_blocked(item.desktop_id, not enabled, _item_binary(item.command))
     if enabled and item.system_path and item.system_path.exists():
         # If the user copy became identical to the system one, remove the copy
         system_text = item.system_path.read_text(encoding="utf-8", errors="replace")
@@ -448,28 +448,139 @@ def _blocked_path() -> Path:
     return data_dir() / "autostart-blocked.json"
 
 
+def _programs_path() -> Path:
+    """{desktop id: program} for the blocked entries, so the guard can also recognise an app
+    that writes its entry again under another file name."""
+    return data_dir() / "autostart-blocked-programs.json"
+
+
+def _guard_last_path() -> Path:
+    return data_dir() / "autostart-guard-last.json"
+
+
 def blocked_ids() -> list[str]:
     return list(load_json(_blocked_path(), []))
 
 
-def _remember_blocked(desktop_id: str, blocked: bool) -> None:
+def _load_programs() -> dict[str, str]:
+    data = load_json(_programs_path(), {})
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str) and v}
+
+
+def _remember_blocked(desktop_id: str, blocked: bool, binary: str = "") -> None:
     ids = set(blocked_ids())
     before = set(ids)
+    programs = _load_programs()
+    before_programs = dict(programs)
     if blocked:
         ids.add(desktop_id)
+        if binary:
+            programs[desktop_id] = binary
     else:
         ids.discard(desktop_id)
+        programs.pop(desktop_id, None)
+        if binary:
+            # switched on on purpose: another blocked entry for the same program must not
+            # hide this one again
+            programs = {k: v for k, v in programs.items() if v != binary}
+    programs = {k: v for k, v in programs.items() if k in ids}
     if ids != before:
         save_json(_blocked_path(), sorted(ids))
+    if programs != before_programs:
+        save_json(_programs_path(), programs)
+
+
+def _fill_missing_programs() -> None:
+    """Entries blocked by an older version have no program recorded: read it from their file."""
+    programs = _load_programs()
+    changed = False
+    for desktop_id in blocked_ids():
+        if desktop_id in programs:
+            continue
+        for base in (user_dir(), *system_dirs()):
+            entry = desktop.parse(base / desktop_id)
+            binary = _item_binary(entry.exec) if entry and entry.exec else ""
+            if binary:
+                programs[desktop_id] = binary
+                changed = True
+                break
+    if changed:
+        save_json(_programs_path(), programs)
+
+
+def guard_last() -> tuple[float, list[str]] | None:
+    """(time, entry names) of the last time the guard had to switch an entry off again."""
+    data = load_json(_guard_last_path(), None)
+    try:
+        return float(data["time"]), [str(n) for n in data["entries"]]
+    except (TypeError, KeyError, ValueError):
+        return None
 
 
 # The guard runs as its own small script so it works no matter how (or whether) Linux
 # Manager Pro is installed. It only adds Hidden=true; it never enables or deletes anything.
-GUARD_SCRIPT = r'''#!/usr/bin/python3 -I
-"""Linux Manager Pro autostart guard (generated, do not edit).
-Keeps the startup entries you switched off in Linux Manager Pro switched off, even when
-the application rewrites its own autostart file."""
-import json, os, sys
+# It hides an entry when its file name is on the list, or when it starts the same program as
+# a blocked entry (apps often write their entry again under another name). Entries made with
+# "Add program" (X-LMP-Created) are never touched.
+GUARD_SCRIPT = r"""#!/usr/bin/python3 -I
+"Linux Manager Pro autostart guard (generated, do not edit)."
+"Keeps the startup entries you switched off in Linux Manager Pro switched off, even when"
+"the application rewrites its own autostart file."
+import json, os, re, shlex, sys, time
+
+CODES = ("%f", "%F", "%u", "%U", "%i", "%c", "%k", "%d", "%D", "%n", "%N", "%v", "%m")
+SHELLS = {"sh", "bash", "dash", "zsh", "fish"}
+GENERIC = SHELLS | {"env", "python", "python3", "perl", "ruby", "node", "java", "sleep",
+                    "nohup", "setsid", "systemd-run", "dbus-launch", "dbus-run-session",
+                    "gtk-launch", "xdg-open", "agent", "daemon", "server", "client", "helper",
+                    "launcher", "applet", "tray", "update", "start", "run", "app", "service"}
+
+def split(line):
+    try:
+        return [t for t in shlex.split(line) if t not in CODES]
+    except ValueError:
+        return [t for t in line.split() if t not in CODES]
+
+def first(tokens):
+    while tokens and (tokens[0] == "env" or "=" in tokens[0].split("/")[-1]):
+        tokens = tokens[1:]
+    if len(tokens) >= 3 and tokens[0].endswith("flatpak") and tokens[1] == "run":
+        rest = [t for t in tokens[2:] if not t.startswith("-")]
+        return rest[0] if rest else ""
+    return os.path.basename(tokens[0]) if tokens else ""
+
+def binary_of(line):
+    tokens = split(line.strip())
+    name = first(tokens)
+    if name in SHELLS:
+        if "-c" not in tokens or tokens.index("-c") + 1 >= len(tokens):
+            return ""
+        for part in reversed(re.split(r"&&|\|\||;|\|", tokens[tokens.index("-c") + 1])):
+            inner = first(split(re.sub(r"^(exec|nohup|setsid)\s+", "", part.strip())))
+            if inner and inner not in GENERIC:
+                return inner
+        return ""
+    return "" if name in GENERIC else name
+
+def entry_info(text):
+    in_main, exec_line, flatpak, own = False, "", "", False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_main = s == "[Desktop Entry]"
+            continue
+        if not in_main or "=" not in s:
+            continue
+        key, value = (x.strip() for x in s.split("=", 1))
+        if key == "Exec" and not exec_line:
+            exec_line = value
+        elif key == "X-Flatpak" and not flatpak:
+            flatpak = value
+        elif key == "X-LMP-Created" and value.lower() == "true":
+            own = True
+    return exec_line, flatpak, own
 
 def hide(text):
     out, in_main, seen, done = [], False, False, set()
@@ -497,20 +608,41 @@ def hide(text):
         return text
     return "\n".join(out) + "\n"
 
-def main(blocked_file, folder):
+def load(path, default):
     try:
-        with open(blocked_file, encoding="utf-8") as f:
-            ids = json.load(f)
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
     except (OSError, ValueError):
+        return default
+
+def main(blocked_file, folder):
+    data_folder = os.path.dirname(blocked_file)
+    ids = {n for n in load(blocked_file, []) if isinstance(n, str)}
+    programs = load(os.path.join(data_folder, "autostart-blocked-programs.json"), {})
+    binaries = {v for v in programs.values() if isinstance(v, str) and v} \
+        if isinstance(programs, dict) else set()
+    if not ids:
         return 0
-    for name in ids:
-        if not isinstance(name, str) or "/" in name or not name.endswith(".desktop"):
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return 0
+    kept = []
+    for name in names:
+        if "/" in name or not name.endswith(".desktop"):
             continue
         path = os.path.join(folder, name)
         if not os.path.isfile(path) or os.path.islink(path):
             continue
-        with open(path, encoding="utf-8", errors="replace") as f:
-            text = f.read()
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        exec_line, flatpak, own = entry_info(text)
+        if name not in ids:
+            if own or not binaries or not (binary_of(exec_line) in binaries or flatpak in binaries):
+                continue
         new = hide(text)
         if new != text:
             tmp = path + ".lmp-tmp"
@@ -518,11 +650,19 @@ def main(blocked_file, folder):
                 f.write(new)
             os.replace(tmp, path)
             print("kept disabled:", name)
+            kept.append(name)
+    if kept:
+        try:
+            with open(os.path.join(data_folder, "autostart-guard-last.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump({"time": time.time(), "entries": kept}, f)
+        except OSError:
+            pass
     return 0
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1], sys.argv[2]))
-'''
+"""
 
 
 def guard_script_path() -> Path:
@@ -545,8 +685,9 @@ def enforce_blocked() -> None:
 
 
 def sync_guard() -> bool:
-    """Installs the guard while something is blocked, removes it when nothing is.
-    Returns True when the guard is active. Missing systemd is not an error."""
+    """Installs the guard while something is blocked, removes it when nothing is, and makes
+    sure it is switched on and running. Returns True when the guard is active. Missing systemd
+    is not an error."""
     units = systemd_user_dir()
     path_unit = units / f"{GUARD_UNIT}.path"
     service_unit = units / f"{GUARD_UNIT}.service"
@@ -559,6 +700,7 @@ def sync_guard() -> bool:
             service_unit.unlink(missing_ok=True)
             run(["systemctl", "--user", "daemon-reload"], timeout=20)
         return False
+    _fill_missing_programs()
     script = guard_script_path()
     if not script.exists() or script.read_text(encoding="utf-8") != GUARD_SCRIPT:
         script.write_text(GUARD_SCRIPT, encoding="utf-8")
@@ -567,8 +709,11 @@ def sync_guard() -> bool:
         "[Unit]\nDescription=Linux Manager Pro: keep disabled startup entries off\n\n"
         f"[Path]\nPathModified={user_dir()}\nUnit={service_unit.name}\n\n"
         "[Install]\nWantedBy=default.target\n")
+    # the guard rewrites a file, which touches the folder it watches: never let systemd's
+    # start limit stop it
     service_text = (
-        "[Unit]\nDescription=Linux Manager Pro: keep disabled startup entries off\n\n"
+        "[Unit]\nDescription=Linux Manager Pro: keep disabled startup entries off\n"
+        "StartLimitIntervalSec=0\n\n"
         "[Service]\nType=oneshot\n"
         f"ExecStart={_python()} -I {_quote_unit_arg(str(script))} "
         f"{_quote_unit_arg(str(_blocked_path()))} {_quote_unit_arg(str(user_dir()))}\n")
@@ -580,7 +725,13 @@ def sync_guard() -> bool:
             changed = True
     if changed:
         run(["systemctl", "--user", "daemon-reload"], timeout=20)
+    enabled = run(["systemctl", "--user", "is-enabled", path_unit.name], timeout=20).ok
+    if not enabled:
         run(["systemctl", "--user", "enable", "--now", path_unit.name], timeout=20)
+    elif changed:
+        run(["systemctl", "--user", "restart", path_unit.name], timeout=20)
+    elif not run(["systemctl", "--user", "is-active", path_unit.name], timeout=20).ok:
+        run(["systemctl", "--user", "start", path_unit.name], timeout=20)
     return True
 
 
@@ -598,9 +749,11 @@ def sync_guard() -> bool:
 SESSION_TARGETS = ("default.target", "graphical-session.target", "plasma-workspace.target")
 _UNIT_TYPES = (".service", ".timer", ".path")
 _SHELLS = {"sh", "bash", "dash", "zsh", "fish"}
+# (also names too common to tell programs apart: another "agent" would be taken for this one)
 _GENERIC = _SHELLS | {"env", "python", "python3", "perl", "ruby", "node", "java", "sleep",
                       "nohup", "setsid", "systemd-run", "dbus-launch", "dbus-run-session",
-                      "gtk-launch", "xdg-open"}
+                      "gtk-launch", "xdg-open", "agent", "daemon", "server", "client", "helper",
+                      "launcher", "applet", "tray", "update", "start", "run", "app", "service"}
 _INTERPRETERS = _SHELLS | {"python", "python3", "perl", "ruby", "node", "java"}
 
 
@@ -872,7 +1025,7 @@ def inspect_items(items: list[AutostartItem], snapshot: Snapshot | None = None
 # user's own folder, never in system files, and `unmask` takes it away again.
 # --------------------------------------------------------------------------- #
 
-_UNIT_RE = re.compile(r"^[A-Za-z0-9:_.@-]+\.(service|timer|path)$")
+_UNIT_RE = re.compile(r"^(?!-)[A-Za-z0-9:_.@-]+\.(service|timer|path)$")
 
 # Units the desktop needs. "block": never switched off from here. "warn": allowed after a
 # confirmation that says what stops working.
@@ -952,6 +1105,35 @@ def unmask_all() -> int:
             _remember_masked(unit, False)
             restored += 1
     return restored
+
+
+# --------------------------------------------------------------------------- #
+# Stop now
+# --------------------------------------------------------------------------- #
+
+_STOP_RE = re.compile(r"^(?!-)[A-Za-z0-9:_.@\\-]+\.(service|scope|timer|path)$")
+# a login session or the user manager: stopping these would end the whole session
+_NEVER_STOP = ("session-", "user@", "user-runtime-dir@", "init.scope")
+
+
+def _stoppable(unit: str) -> bool:
+    return (bool(unit) and bool(_STOP_RE.match(unit)) and not unit.startswith(_NEVER_STOP)
+            and not unit.startswith(GUARD_UNIT) and unit_risk(unit)[0] != "block")
+
+
+def can_stop(item: AutostartItem) -> bool:
+    """A program that is running now inside a systemd unit that is safe to stop."""
+    return bool(item.running) and _stoppable(item.runner)
+
+
+def stop_now(item: AutostartItem) -> None:
+    """Stops the unit the program runs in (`systemctl --user stop`). Switching an entry off
+    does not do this: it only decides what happens at the next login."""
+    if not can_stop(item):
+        raise PermissionError(tr("{name} cannot be stopped from here.").format(name=item.name))
+    res = run(["systemctl", "--user", "stop", item.runner], timeout=30)
+    if not res.ok:
+        raise OSError(res.err.strip() or res.out.strip() or "systemctl")
 
 
 # --------------------------------------------------------------------------- #

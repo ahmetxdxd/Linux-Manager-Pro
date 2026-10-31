@@ -2,7 +2,10 @@
 
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -491,3 +494,249 @@ class MaskTests(unittest.TestCase):
         item = next(i for i in autostart.inspect_items([entry], snap) if i.kind == autostart.APP)
         self.assertTrue(item.running)                    # still running until it quits
         self.assertFalse(item.other_start)               # but it will not come back
+
+
+def _write_entry(name, exec_line, extra=""):
+    autostart.user_dir().mkdir(parents=True, exist_ok=True)
+    path = autostart.user_dir() / name
+    path.write_text(f"[Desktop Entry]\nType=Application\nName={name}\nExec={exec_line}\n{extra}")
+    return path
+
+
+class GuardTests(unittest.TestCase):
+    """The guard keeps a switched-off program off, even if its entry comes back renamed."""
+
+    def setUp(self):
+        shutil.rmtree(autostart.user_dir(), ignore_errors=True)
+        for path in (autostart._blocked_path(), autostart._programs_path(),
+                     autostart._guard_last_path()):
+            path.unlink(missing_ok=True)
+        self.empty = Path(tempfile.mkdtemp())
+        os.environ["XDG_CONFIG_DIRS"] = str(self.empty)
+        self.addCleanup(os.environ.pop, "XDG_CONFIG_DIRS", None)
+
+    def _block(self, name, command):
+        _write_entry(name, command)
+        item = next(i for i in autostart.list_items() if i.desktop_id == name)
+        autostart.set_enabled(item, False)
+        return item
+
+    def test_program_is_remembered_with_the_block(self):
+        self._block("chat.desktop", "/opt/chat/chat-app --background")
+        self.assertEqual(autostart._load_programs(), {"chat.desktop": "chat-app"})
+        self.assertEqual(autostart.blocked_ids(), ["chat.desktop"])       # old file format kept
+
+    def test_entry_written_again_under_another_name_is_hidden(self):
+        self._block("chat.desktop", "chat-app")
+        renamed = _write_entry("com.chat.App.desktop", "/opt/chat/chat-app --autostart")
+        other = _write_entry("other.desktop", "other-app")
+        mine = _write_entry("mine.desktop", "chat-app", "X-LMP-Created=true\n")
+        autostart.enforce_blocked()
+        self.assertIn("Hidden=true", renamed.read_text())
+        self.assertNotIn("Hidden", other.read_text())          # a different program
+        self.assertNotIn("Hidden", mine.read_text())           # made by "Add program"
+        when, names = autostart.guard_last()
+        self.assertEqual(names, ["com.chat.App.desktop"])
+        self.assertLess(abs(when - time.time()), 60)
+
+    def test_flatpak_entry_is_recognised_by_application_id(self):
+        self._block("chat.desktop", "flatpak run com.chat.App")
+        renamed = _write_entry("flatpak-chat.desktop",
+                               "/usr/bin/flatpak run --branch=stable --command=chat com.chat.App")
+        autostart.enforce_blocked()
+        self.assertIn("Hidden=true", renamed.read_text())
+
+    def test_wrapped_command_is_recognised(self):
+        self._block("tray.desktop", 'sh -c "sleep 3 && arch-update --tray"')
+        self.assertEqual(autostart._load_programs()["tray.desktop"], "arch-update")
+        renamed = _write_entry("tray2.desktop", "arch-update --tray")
+        autostart.enforce_blocked()
+        self.assertIn("Hidden=true", renamed.read_text())
+
+    def test_names_too_common_to_tell_programs_apart_are_not_matched(self):
+        self._block("geoclue.desktop", "/usr/lib/geoclue-2.0/demos/agent")
+        self.assertEqual(autostart._load_programs(), {})
+        unrelated = _write_entry("other.desktop", "/opt/other/agent")
+        autostart.enforce_blocked()
+        self.assertNotIn("Hidden", unrelated.read_text())
+
+    def test_unknown_program_is_matched_by_file_name_only(self):
+        self._block("wrap.desktop", "sh -c 'sleep 5'")                   # no program to compare
+        self.assertEqual(autostart._load_programs(), {})
+        unrelated = _write_entry("x.desktop", "sh -c 'sleep 5'")
+        autostart.enforce_blocked()
+        self.assertNotIn("Hidden", unrelated.read_text())
+
+    def test_switching_on_is_not_undone_by_a_twin_entry(self):
+        a = self._block("a.desktop", "chat-app")
+        self._block("b.desktop", "chat-app")
+        a = next(i for i in autostart.list_items() if i.desktop_id == "a.desktop")
+        autostart.set_enabled(a, True)
+        autostart.enforce_blocked()
+        items = {i.desktop_id: i for i in autostart.list_items()}
+        self.assertTrue(items["a.desktop"].enabled)
+        self.assertFalse(items["b.desktop"].enabled)
+        self.assertEqual(autostart._load_programs(), {})
+
+    def test_removing_the_block_forgets_the_program(self):
+        item = self._block("chat.desktop", "chat-app")
+        autostart.set_enabled(item, True)
+        self.assertEqual((autostart.blocked_ids(), autostart._load_programs()), ([], {}))
+
+    def test_old_blocks_get_their_program_from_the_entry_file(self):
+        _write_entry("chat.desktop", "/opt/chat/chat-app", "Hidden=true\n")
+        autostart._blocked_path().write_text('["chat.desktop"]')          # made by an older version
+        autostart._fill_missing_programs()
+        self.assertEqual(autostart._load_programs(), {"chat.desktop": "chat-app"})
+
+    def test_script_runs_on_its_own(self):
+        self._block("chat.desktop", "chat-app")
+        script = Path(tempfile.mkdtemp()) / "guard.py"
+        script.write_text(autostart.GUARD_SCRIPT)
+        renamed = _write_entry("new.desktop", "chat-app")
+        link = autostart.user_dir() / "link.desktop"
+        link.symlink_to(renamed)
+        res = subprocess.run([sys.executable, "-I", str(script), str(autostart._blocked_path()),
+                              str(autostart.user_dir())], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("kept disabled: new.desktop", res.stdout)
+        self.assertIn("Hidden=true", renamed.read_text())
+        # a missing folder or list is not an error
+        for args in ((str(autostart._blocked_path()), "/nonexistent"), ("/nonexistent.json", "/tmp")):
+            self.assertEqual(subprocess.run([sys.executable, "-I", str(script), *args]).returncode, 0)
+
+    def test_script_and_app_agree_on_the_program(self):
+        namespace: dict = {}
+        exec(compile(autostart.GUARD_SCRIPT, "guard", "exec"), namespace)
+        for command in ("kaccess", "/usr/lib/org_kde_powerdevil --x %U", "env A=1 /opt/x/tool",
+                        "flatpak run com.x.Y", "/usr/bin/flatpak run --branch=stable com.x.Y",
+                        'sh -c "sleep 3 && arch-update --tray"', "sh -c 'sleep 5; exec foo --x'",
+                        "sh -c 'sleep 5'", "bash", "env", "python3 /opt/app/tray.py",
+                        "/usr/lib/geoclue-2.0/demos/agent"):
+            self.assertEqual(namespace["binary_of"](command), autostart._item_binary(command),
+                             command)
+
+
+class SyncGuardTests(unittest.TestCase):
+    """Installing the guard and keeping it running (systemctl is faked)."""
+
+    def setUp(self):
+        shutil.rmtree(autostart.user_dir(), ignore_errors=True)
+        shutil.rmtree(autostart.systemd_user_dir(), ignore_errors=True)
+        autostart._blocked_path().unlink(missing_ok=True)
+        autostart._programs_path().unlink(missing_ok=True)
+        self.addCleanup(shutil.rmtree, autostart.systemd_user_dir(), ignore_errors=True)
+        self.calls = []
+        self.enabled = self.active = False
+
+        def fake_run(cmd, **_kw):
+            cmd = list(cmd)
+            self.calls.append(cmd[2:])
+            if cmd[2] == "is-enabled":
+                return CmdResult(0 if self.enabled else 1, "", "")
+            if cmd[2] == "is-active":
+                return CmdResult(0 if self.active else 3, "", "")
+            return CmdResult(0, "", "")
+        for patcher in (mock.patch.object(autostart, "run", fake_run),
+                        mock.patch.object(autostart.shutil, "which", lambda _n: "/usr/bin/systemctl")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        _write_entry("chat.desktop", "chat-app")
+        autostart.set_enabled(next(i for i in autostart.list_items() if i.name == "chat.desktop"),
+                              False)
+        self.calls.clear()
+
+    def _verbs(self):
+        return [c[0] for c in self.calls]
+
+    def test_installs_enables_and_never_hits_the_start_limit(self):
+        self.assertTrue(autostart.sync_guard())
+        service = (autostart.systemd_user_dir() / f"{autostart.GUARD_UNIT}.service").read_text()
+        self.assertIn("StartLimitIntervalSec=0", service)
+        self.assertEqual(self._verbs(), ["daemon-reload", "is-enabled", "enable"])
+        self.assertTrue(autostart.guard_script_path().exists())
+
+    def test_nothing_to_do_when_it_is_already_running(self):
+        autostart.sync_guard()
+        self.enabled = self.active = True
+        self.calls.clear()
+        self.assertTrue(autostart.sync_guard())
+        self.assertEqual(self._verbs(), ["is-enabled", "is-active"])
+
+    def test_started_again_when_it_stopped(self):
+        autostart.sync_guard()
+        self.enabled, self.active = True, False
+        self.calls.clear()
+        autostart.sync_guard()
+        self.assertEqual(self._verbs(), ["is-enabled", "is-active", "start"])
+
+    def test_switched_on_again_when_somebody_disabled_it(self):
+        autostart.sync_guard()
+        self.enabled = False
+        self.calls.clear()
+        autostart.sync_guard()
+        self.assertEqual(self._verbs(), ["is-enabled", "enable"])
+
+    def test_old_unit_files_are_replaced_and_the_unit_restarted(self):
+        autostart.sync_guard()
+        service = autostart.systemd_user_dir() / f"{autostart.GUARD_UNIT}.service"
+        service.write_text(service.read_text().replace("StartLimitIntervalSec=0\n", ""))
+        self.enabled = self.active = True
+        self.calls.clear()
+        autostart.sync_guard()
+        self.assertIn("StartLimitIntervalSec=0", service.read_text())
+        self.assertEqual(self._verbs(), ["daemon-reload", "is-enabled", "restart"])
+
+    def test_removed_when_nothing_is_blocked(self):
+        autostart.sync_guard()
+        autostart._blocked_path().write_text("[]")
+        self.calls.clear()
+        self.assertFalse(autostart.sync_guard())
+        self.assertFalse((autostart.systemd_user_dir() / f"{autostart.GUARD_UNIT}.path").exists())
+        self.assertEqual(self._verbs(), ["disable", "daemon-reload"])
+
+
+class StopNowTests(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+        self.fail = False
+
+        def fake_run(cmd, **_kw):
+            self.calls.append(list(cmd))
+            return CmdResult(1, "", "Failed to stop") if self.fail else CmdResult(0, "", "")
+        patcher = mock.patch.object(autostart, "run", fake_run)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _item(self, runner, running=True):
+        return autostart.AutostartItem(
+            desktop_id="x.desktop", name="X", command="x", comment="", icon="", enabled=False,
+            origin="user", user_path=None, system_path=None, running=running, runner=runner)
+
+    def test_stops_the_unit_the_program_runs_in(self):
+        for runner in ("plasma-kaccess.service", "app-gnome\\x2dkeyring@autostart.service",
+                       "app-flatpak-com.x.Y-123.scope"):
+            item = self._item(runner)
+            self.assertTrue(autostart.can_stop(item), runner)
+            autostart.stop_now(item)
+            self.assertEqual(self.calls[-1], ["systemctl", "--user", "stop", runner])
+
+    def test_never_stops_the_session_or_the_desktop(self):
+        for runner in ("session-3.scope", "user@1000.service", "init.scope", "",
+                       "plasma-plasmashell.service", "plasma-kwin_wayland.service",
+                       "dbus-broker.service", "lmp-autostart-guard.service", "-x.service",
+                       "x.service --now", "../x.service", "not-a-unit"):
+            item = self._item(runner)
+            self.assertFalse(autostart.can_stop(item), runner)
+            with self.assertRaises(PermissionError):
+                autostart.stop_now(item)
+        self.assertEqual(self.calls, [])
+
+    def test_only_what_is_running(self):
+        self.assertFalse(autostart.can_stop(self._item("plasma-kaccess.service", running=False)))
+        self.assertFalse(autostart.can_stop(self._item("plasma-kaccess.service", running=None)))
+
+    def test_failure_is_reported(self):
+        self.fail = True
+        with self.assertRaises(OSError):
+            autostart.stop_now(self._item("plasma-kaccess.service"))
