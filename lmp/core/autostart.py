@@ -27,7 +27,7 @@ from pathlib import Path
 
 from lmp.core import desktop
 from lmp.core.util import HOME, current_desktops, data_dir, load_json, move_to_trash, run, save_json
-from lmp.i18n import tr
+from lmp.i18n import tr, tr_noop
 
 APP, SERVICE, WM = "app", "service", "wm"
 GUARD_UNIT = "lmp-autostart-guard"
@@ -64,6 +64,9 @@ class AutostartItem:
     kind: str = APP
     source: str = ""            # what to show as the origin (e.g. "hyprland.conf")
     readonly: bool = False      # found by `inspect_items()`; cannot be switched here
+    via_mask: bool = False      # a system unit: switched off by masking it (see `mask_unit`)
+    risk: str = ""              # "warn" = ask first, "block" = never from here (see `unit_risk`)
+    risk_note: str = ""         # why (a message id; translate with tr())
     running: bool | None = None  # None = not checked / unknown
     runner: str = ""            # systemd unit (or scope) the running program belongs to
     other_start: bool = False   # running through a session service, not its own autostart entry
@@ -340,7 +343,9 @@ def list_items() -> list[AutostartItem]:
 def set_enabled(item: AutostartItem, enabled: bool) -> None:
     if item.readonly:
         raise PermissionError(tr("This system service cannot be switched off from here."))
-    if item.kind == SERVICE:
+    if item.via_mask:
+        _set_unit_masked(item, enabled)
+    elif item.kind == SERVICE:
         _set_service_enabled(item, enabled)
     elif item.kind == WM:
         _set_wm_enabled(item, enabled)
@@ -629,7 +634,10 @@ class Snapshot:
     procs: list[ProcInfo]
 
     def is_session_unit(self, unit: str) -> bool:
-        return unit in self.pulled_by and not unit.startswith("app-")
+        """Started by the session itself (a masked unit is still listed there, but cannot run)."""
+        info = self.units.get(unit)
+        return (unit in self.pulled_by and not unit.startswith("app-")
+                and not (info and info.load == "masked"))
 
     def find_process(self, binary: str) -> ProcInfo | None:
         if not binary:
@@ -798,7 +806,7 @@ def inspect_items(items: list[AutostartItem], snapshot: Snapshot | None = None
     it from a background thread."""
     if snapshot is None:
         extra = [app_unit_name(i.desktop_id) if i.kind == APP else i.desktop_id
-                 for i in items if i.kind in (APP, SERVICE)]
+                 for i in items if i.kind in (APP, SERVICE)] + masked_by_us()
         snapshot = take_snapshot(extra)
     snap = snapshot
 
@@ -826,20 +834,124 @@ def inspect_items(items: list[AutostartItem], snapshot: Snapshot | None = None
             item.other_start = snap.is_session_unit(proc.unit) and proc.unit != own
 
     known = {i.desktop_id for i in items if i.kind == SERVICE}
+    candidates = dict(snap.pulled_by)
+    for unit in masked_by_us():
+        candidates.setdefault(unit, "masked")
     extra_items = []
-    for unit, pulled in sorted(snap.pulled_by.items()):
+    for unit, pulled in sorted(candidates.items()):
         info = snap.units.get(unit)
-        if unit in known or not info or info.load != "loaded":
+        if unit in known or not info:
             continue
-        fragment = Path(info.fragment) if info.fragment else None
+        masked = info.load == "masked"
+        if not masked and (info.load != "loaded" or unit not in snap.pulled_by):
+            continue
+        risk, note = unit_risk(unit)
+        # a masked unit's "file" is our own link to /dev/null, not where the unit comes from
+        fragment = Path(info.fragment) if info.fragment and not masked else None
         mine = fragment is not None and systemd_user_dir() in fragment.parents
+        # system units are switched off by masking them; the user's own non-service units
+        # (timers, paths), critical units and masks made outside the user's folder are not
+        manageable = (not mine and unit.endswith(_UNIT_TYPES) and risk != "block"
+                      and (not masked or _is_user_mask(unit)))
         extra_items.append(AutostartItem(
             desktop_id=unit, name=info.description or unit.rsplit(".", 1)[0],
-            command=unit, comment=f"{unit} · {pulled}", icon="", enabled=True,
+            command=unit, comment=f"{unit} · {pulled}", icon="", enabled=not masked,
             origin="user" if mine else "system", user_path=None, system_path=fragment,
-            kind=SERVICE, source=pulled, readonly=True, running=info.running,
+            kind=SERVICE, source=pulled, readonly=not manageable, via_mask=manageable,
+            risk=risk, risk_note=note, running=info.running,
             runner=unit if info.running else ""))
     return _sorted(items + extra_items)
+
+
+# --------------------------------------------------------------------------- #
+# Switching off system units: mask
+#
+# `systemctl --user disable` only removes a WantedBy= link. The units Plasma starts are pulled
+# in by Wants= lines inside the target itself, so they have to be masked: a link to /dev/null
+# in ~/.config/systemd/user, which nothing (not even Wants=) can start. It is made in the
+# user's own folder, never in system files, and `unmask` takes it away again.
+# --------------------------------------------------------------------------- #
+
+_UNIT_RE = re.compile(r"^[A-Za-z0-9:_.@-]+\.(service|timer|path)$")
+
+# Units the desktop needs. "block": never switched off from here. "warn": allowed after a
+# confirmation that says what stops working.
+_RISKS = {
+    "plasma-plasmashell.service": ("block", tr_noop("The desktop shell: panel, widgets and wallpaper.")),
+    "plasma-ksmserver.service": ("block", tr_noop("The session manager.")),
+    "plasma-kded6.service": ("block", tr_noop("A core desktop daemon that many parts of the desktop depend on.")),
+    "plasma-kded5.service": ("block", tr_noop("A core desktop daemon that many parts of the desktop depend on.")),
+    "plasma-kactivitymanagerd.service": ("block", tr_noop("The activity manager the desktop shell depends on.")),
+    "dbus.service": ("block", tr_noop("The message bus every desktop program uses.")),
+    "dbus-broker.service": ("block", tr_noop("The message bus every desktop program uses.")),
+    "xdg-desktop-portal.service": ("block", tr_noop("Lets sandboxed programs open files, share the screen and more.")),
+    "plasma-polkit-agent.service": ("warn", tr_noop("Without it, programs cannot ask for your administrator password.")),
+    "plasma-powerdevil.service": ("warn", tr_noop("Power management: screen brightness, sleep and battery actions stop working.")),
+    "plasma-kglobalaccel.service": ("warn", tr_noop("Global keyboard shortcuts stop working.")),
+    "plasma-kwallet-pam.service": ("warn", tr_noop("Unlocks your KDE wallet at login; saved passwords may be asked for again.")),
+    "wireplumber.service": ("warn", tr_noop("The audio and video session manager: sound stops working.")),
+    "pipewire.service": ("warn", tr_noop("The audio and video server: sound stops working.")),
+    "pipewire-pulse.service": ("warn", tr_noop("The audio and video server: sound stops working.")),
+    "gnome-keyring-daemon.service": ("warn", tr_noop("Stores your passwords and keys; programs will ask for them again.")),
+}
+
+
+def unit_risk(unit: str) -> tuple[str, str]:
+    """("block" | "warn" | "", message id explaining why)."""
+    if unit.startswith("plasma-kwin_"):
+        return "block", tr_noop("The window manager and compositor.")
+    return _RISKS.get(unit, ("", ""))
+
+
+def _masked_path() -> Path:
+    return data_dir() / "autostart-masked.json"
+
+
+def masked_by_us() -> list[str]:
+    """Units this program masked (so they can be shown and switched back on)."""
+    return list(load_json(_masked_path(), []))
+
+
+def _is_user_mask(unit: str) -> bool:
+    link = systemd_user_dir() / unit
+    try:
+        return link.is_symlink() and os.readlink(link) == "/dev/null"
+    except OSError:
+        return False
+
+
+def _remember_masked(unit: str, masked: bool) -> None:
+    ids = set(masked_by_us())
+    before = set(ids)
+    ids.add(unit) if masked else ids.discard(unit)
+    if ids != before:
+        save_json(_masked_path(), sorted(ids))
+
+
+def _set_unit_masked(item: AutostartItem, enabled: bool) -> None:
+    """Switching on = unmask. Switching off = mask: it will not start at the next login. A
+    program that is running now keeps running until it quits."""
+    unit = item.desktop_id
+    if not _UNIT_RE.match(unit):
+        raise ValueError(tr("Invalid action: {action} {name}").format(
+            action="unmask" if enabled else "mask", name=unit))
+    if not enabled and unit_risk(unit)[0] == "block":
+        raise PermissionError(tr("This system service cannot be switched off from here."))
+    res = run(["systemctl", "--user", "unmask" if enabled else "mask", unit], timeout=30)
+    if not res.ok:
+        raise OSError(res.err.strip() or res.out.strip() or "systemctl")
+    _remember_masked(unit, not enabled)
+
+
+def unmask_all() -> int:
+    """Undoes every mask made here. Returns how many units were switched back on; ones that
+    could not be are kept in the list."""
+    restored = 0
+    for unit in masked_by_us():
+        if _UNIT_RE.match(unit) and run(["systemctl", "--user", "unmask", unit], timeout=30).ok:
+            _remember_masked(unit, False)
+            restored += 1
+    return restored
 
 
 # --------------------------------------------------------------------------- #

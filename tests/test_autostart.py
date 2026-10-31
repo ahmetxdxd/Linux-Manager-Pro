@@ -330,7 +330,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(item.running)           # cannot tell, so say nothing
         self.assertFalse(item.other_start)
 
-    def test_session_services_are_listed_read_only(self):
+    def test_session_services_are_listed(self):
         wants = systemd_wants = autostart.systemd_user_dir() / "default.target.wants"
         wants.mkdir(parents=True, exist_ok=True)
         (autostart.systemd_user_dir() / "mine.service").write_text("[Unit]\nDescription=Mine\n")
@@ -343,26 +343,41 @@ class RuntimeTests(unittest.TestCase):
                                       p["SubState"], p["FragmentPath"]) for n, p in units.items()}
         info["mine.service"] = autostart.UnitInfo("mine.service", "Mine", "loaded", "active",
                                                   "running")
+        for name in ("plasma-plasmashell.service",):
+            info[name] = autostart.UnitInfo(name, "Plasma", "loaded", "active", "running",
+                                            "/usr/lib/systemd/user/" + name)
         pulled = {"plasma-kaccess.service": "plasma-workspace.target",
                   "plasma-powerdevil.service": "plasma-workspace.target",
+                  "plasma-plasmashell.service": "plasma-workspace.target",
                   "mine.service": "default.target", "gone.service": "default.target"}
         snap = self._snapshot(units=info, pulled=pulled)
         items = autostart.inspect_items(autostart.list_items(), snap)
         services = {i.desktop_id: i for i in items if i.kind == autostart.SERVICE}
 
         self.assertEqual(sorted(services),
-                         ["mine.service", "plasma-kaccess.service", "plasma-powerdevil.service"])
-        self.assertFalse(services["mine.service"].readonly)        # the user's own: still switchable
-        self.assertTrue(services["mine.service"].running)
-        kaccess = services["plasma-kaccess.service"]               # not duplicated, not switchable
-        self.assertTrue(kaccess.readonly)
+                         ["mine.service", "plasma-kaccess.service", "plasma-plasmashell.service",
+                          "plasma-powerdevil.service"])
+        mine = services["mine.service"]                            # the user's own: plain disable
+        self.assertFalse(mine.readonly or mine.via_mask)
+        self.assertTrue(mine.running)
+        kaccess = services["plasma-kaccess.service"]               # a system unit: switched by mask
+        self.assertTrue(kaccess.via_mask)
+        self.assertFalse(kaccess.readonly)
         self.assertTrue(kaccess.enabled)
         self.assertTrue(kaccess.running)
         self.assertEqual(kaccess.name, "KAccess")
         self.assertEqual(kaccess.origin, "system")
-        self.assertFalse(services["plasma-powerdevil.service"].running)
+        self.assertEqual(kaccess.risk, "")
+        powerdevil = services["plasma-powerdevil.service"]
+        self.assertEqual(powerdevil.risk, "warn")                  # asks first
+        self.assertTrue(powerdevil.via_mask)
+        self.assertFalse(powerdevil.running)
+        shell = services["plasma-plasmashell.service"]             # the desktop needs it
+        self.assertTrue(shell.readonly)
+        self.assertFalse(shell.via_mask)
+        self.assertEqual(shell.risk, "block")
         with self.assertRaises(PermissionError):
-            autostart.set_enabled(kaccess, False)
+            autostart.set_enabled(shell, False)
 
     def test_disable_all_ignores_system_services(self):
         autostart.add_item("Mine", "mine-app")
@@ -372,4 +387,107 @@ class RuntimeTests(unittest.TestCase):
         snap = self._snapshot(units=units, pulled={"plasma-kaccess.service": "plasma-workspace.target"})
         items = autostart.inspect_items(autostart.list_items(), snap)
         self.assertEqual(autostart.disable_all(items), [autostart.list_items()[0].desktop_id])
-        self.assertTrue(next(i for i in items if i.readonly).enabled)
+        self.assertTrue(next(i for i in items if i.kind == autostart.SERVICE).enabled)
+
+
+class MaskTests(unittest.TestCase):
+    """Switching system units off by masking them (systemctl is faked)."""
+
+    def setUp(self):
+        autostart._masked_path().unlink(missing_ok=True)
+        shutil.rmtree(autostart.systemd_user_dir(), ignore_errors=True)
+        self.addCleanup(shutil.rmtree, autostart.systemd_user_dir(), ignore_errors=True)
+        self.calls = []
+        self.fail = False
+
+        def fake_run(cmd, **_kw):
+            self.calls.append(list(cmd))
+            return CmdResult(1, "", "File exists") if self.fail else CmdResult(0, "", "")
+        patcher = mock.patch.object(autostart, "run", fake_run)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _item(self, unit="plasma-kaccess.service", **kw):
+        return autostart.AutostartItem(
+            desktop_id=unit, name=unit, command=unit, comment="", icon="", enabled=True,
+            origin="system", user_path=None, system_path=None, kind=autostart.SERVICE,
+            via_mask=True, **kw)
+
+    def test_switch_off_masks_and_on_unmasks(self):
+        item = self._item()
+        autostart.set_enabled(item, False)
+        self.assertEqual(self.calls[-1], ["systemctl", "--user", "mask", item.desktop_id])
+        self.assertEqual(autostart.masked_by_us(), [item.desktop_id])
+        autostart.set_enabled(item, True)
+        self.assertEqual(self.calls[-1], ["systemctl", "--user", "unmask", item.desktop_id])
+        self.assertEqual(autostart.masked_by_us(), [])
+
+    def test_failure_is_reported_and_not_remembered(self):
+        self.fail = True
+        with self.assertRaises(OSError):
+            autostart.set_enabled(self._item(), False)
+        self.assertEqual(autostart.masked_by_us(), [])
+
+    def test_bad_names_and_critical_units_are_refused(self):
+        with self.assertRaises(ValueError):
+            autostart.set_enabled(self._item("../evil.service"), False)
+        with self.assertRaises(ValueError):
+            autostart.set_enabled(self._item("x.service --now"), False)
+        # even if a caller forgets the read-only flag, a critical unit is not masked
+        with self.assertRaises(PermissionError):
+            autostart.set_enabled(self._item("plasma-plasmashell.service"), False)
+        self.assertEqual(self.calls, [])
+
+    def test_unit_risk(self):
+        self.assertEqual(autostart.unit_risk("plasma-kwin_wayland.service")[0], "block")
+        self.assertEqual(autostart.unit_risk("plasma-polkit-agent.service")[0], "warn")
+        self.assertEqual(autostart.unit_risk("plasma-kaccess.service"), ("", ""))
+
+    def test_unmask_all_keeps_what_failed(self):
+        for unit in ("plasma-kaccess.service", "arch-update.timer"):
+            autostart.set_enabled(self._item(unit), False)
+        self.fail = True
+        self.assertEqual(autostart.unmask_all(), 0)
+        self.assertEqual(len(autostart.masked_by_us()), 2)
+        self.fail = False
+        self.assertEqual(autostart.unmask_all(), 2)
+        self.assertEqual(autostart.masked_by_us(), [])
+
+    def test_masked_unit_is_shown_off_and_can_be_switched_back_on(self):
+        link = autostart.systemd_user_dir() / "plasma-kaccess.service"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to("/dev/null")
+        masked = autostart.UnitInfo("plasma-kaccess.service", "KAccess", "masked", "inactive",
+                                    "dead", str(link))
+        snap = autostart.Snapshot(
+            units={masked.name: masked},
+            pulled_by={masked.name: "plasma-workspace.target"}, procs=[])
+        item = autostart.inspect_items([], snap)[0]
+        self.assertFalse(item.enabled)
+        self.assertTrue(item.via_mask)
+        self.assertFalse(item.readonly)
+        self.assertEqual(item.origin, "system")          # not mistaken for a user's own unit
+        self.assertFalse(snap.is_session_unit(masked.name))
+
+    def test_masked_by_the_system_cannot_be_unmasked_here(self):
+        masked = autostart.UnitInfo("foo.service", "Foo", "masked", "inactive", "dead", "")
+        snap = autostart.Snapshot({masked.name: masked}, {masked.name: "default.target"}, [])
+        item = autostart.inspect_items([], snap)[0]
+        self.assertFalse(item.enabled)
+        self.assertTrue(item.readonly)                   # no link of ours in the user folder
+
+    def test_masking_stops_the_still_started_warning(self):
+        autostart.add_item("Accessibility", "kaccess")
+        entry = autostart.list_items()[0]
+        autostart.set_enabled(entry, False)
+        link = autostart.systemd_user_dir() / "plasma-kaccess.service"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to("/dev/null")
+        masked = autostart.UnitInfo("plasma-kaccess.service", "KAccess", "masked", "inactive",
+                                    "dead", str(link))
+        proc = autostart.ProcInfo("kaccess", frozenset({"kaccess"}), "plasma-kaccess.service", "")
+        snap = autostart.Snapshot({masked.name: masked}, {masked.name: "plasma-workspace.target"},
+                                  [proc])
+        item = next(i for i in autostart.inspect_items([entry], snap) if i.kind == autostart.APP)
+        self.assertTrue(item.running)                    # still running until it quits
+        self.assertFalse(item.other_start)               # but it will not come back

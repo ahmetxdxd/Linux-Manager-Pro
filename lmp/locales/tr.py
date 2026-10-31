@@ -35,6 +35,8 @@ MESSAGES = {
         '<b>Uyarı:</b> Bazı paketlere başka paketler bağımlı, kaldırma başarısız olabilir:<br>',
     "A PGP signature could not be verified. Try 'Skip PGP verification' in the builder options.":
         "PGP imzası doğrulanamadı. Derleyici ayarlarında 'PGP doğrulamasını atla'yı deneyin.",
+    'A core desktop daemon that many parts of the desktop depend on.':
+        'Masaüstünün birçok parçasının dayandığı çekirdek bir arka plan servisi.',
     'A folder with the same name already exists at the destination: {path}':
         'Hedefte aynı adlı klasör var: {path}',
     'AUR / local':
@@ -125,6 +127,8 @@ MESSAGES = {
         'Toplu derleme',
     'Before building':
         'Derlemeden önce',
+    'Block service':
+        'Servisi engelle',
     'Boot time':
         'Açılış süresi',
     'Broken':
@@ -423,6 +427,8 @@ MESSAGES = {
         'Git adresi, ör. https://github.com/kullanici/proje',
     'Git repository':
         'Git deposu',
+    'Global keyboard shortcuts stop working.':
+        'Genel klavye kısayolları çalışmaz.',
     'GnuPG (contains private keys)':
         'GnuPG (gizli anahtarlar içerir)',
     'Hidden folder':
@@ -505,6 +511,8 @@ MESSAGES = {
         'Artık dosyalar',
     'Leftover scan failed: {e}':
         'Artık taraması başarısız: {e}',
+    'Lets sandboxed programs open files, share the screen and more.':
+        'Korumalı (sandbox) programların dosya açmasını, ekran paylaşmasını vb. sağlar.',
     'Library folder':
         'Kütüphane klasörü',
     'Light':
@@ -537,6 +545,8 @@ MESSAGES = {
         'Servisleri yönet',
     'Mask':
         'Maskele',
+    'Mask {unit} so it no longer starts at login. Switch it back on in the Background services list to undo this.':
+        '{unit} birimini maskeler, böylece oturum açılışında artık başlamaz. Geri almak için Arka plan servisleri listesinden tekrar açın.',
     'Masked':
         'Maskeli',
     'Masked (runtime)':
@@ -715,6 +725,8 @@ MESSAGES = {
         'Başka klasör seç…',
     'Points to a service that no longer exists':
         'Artık var olmayan bir servise işaret ediyor',
+    'Power management: screen brightness, sleep and battery actions stop working.':
+        'Güç yönetimi: ekran parlaklığı, uyku ve pil işlemleri çalışmaz.',
     'Preparing…':
         'Hazırlanıyor…',
     'Preview: /etc/makepkg.conf not found (is pacman installed?)':
@@ -795,6 +807,8 @@ MESSAGES = {
         'Servis yeniden başlatılıyor: {s}',
     'Restore':
         'Geri yükle',
+    'Restore services':
+        'Servisleri geri yükle',
     'Restoring settings':
         'Ayarlar geri yükleniyor',
     'Run at login':
@@ -927,6 +941,14 @@ MESSAGES = {
         'Duruyor',
     'Stopping service: {s}':
         'Servis durduruluyor: {s}',
+    'Stores your passwords and keys; programs will ask for them again.':
+        'Parolalarınızı ve anahtarlarınızı saklar; programlar bunları tekrar soracak.',
+    'Switch back on every system service that was switched off here':
+        'Burada kapatılan tüm sistem servislerini yeniden aç',
+    'Switch off':
+        'Kapat',
+    'Switch off {name}':
+        '{name} kapatılsın mı',
     'Switched off here, but {unit} still starts it.':
         'Burada kapalı, ama {unit} yine de başlatıyor.',
     'System':
@@ -951,6 +973,8 @@ MESSAGES = {
         'Sistem yöneticisi · v{version}',
     'System service':
         'Sistem servisi',
+    'System service. Switched off here, it is masked (systemctl --user mask) so it no longer starts at login; switching it on removes the mask.':
+        'Sistem servisi. Burada kapatılınca maskelenir (systemctl --user mask) ve oturum açılışında başlamaz; açılınca maske kaldırılır.',
     'System services':
         'Sistem servisleri',
     'Tag: {tag}':
@@ -963,20 +987,32 @@ MESSAGES = {
         'Metin (*.txt)',
     'The Flatpak location must be on an external disk.':
         'Flatpak alanı bir harici disk üzerinde olmalı.',
+    'The activity manager the desktop shell depends on.':
+        'Masaüstü kabuğunun dayandığı etkinlik yöneticisi.',
     'The app is already in this installation.':
         'Uygulama zaten bu alanda.',
     'The application is still installed. Deleting its user data below only resets its settings; to remove the program itself use “Remove”.':
         'Uygulama hâlâ kurulu. Aşağıdaki kullanıcı verilerini silmek yalnızca ayarlarını sıfırlar; programın kendisini kaldırmak için “Kaldır”ı kullanın.',
+    'The audio and video server: sound stops working.':
+        'Ses ve görüntü sunucusu: ses çalışmaz.',
+    'The audio and video session manager: sound stops working.':
+        'Ses ve görüntü oturum yöneticisi: ses çalışmaz.',
     'The build runs as your normal user; you are asked for your password for dependencies and installation.':
         'Derleme normal kullanıcıyla yapılır; bağımlılıklar ve kurulum için parola sorulur.',
+    'The desktop shell: panel, widgets and wallpaper.':
+        'Masaüstü kabuğu: panel, widget’lar ve duvar kağıdı.',
     "The installed version comes from the '{repo}' repository; Arch's official PKGBUILD will be built.":
         "Kurulu sürüm '{repo}' deposundan geliyor; Arch'ın resmi PKGBUILD'i derlenecek.",
+    'The message bus every desktop program uses.':
+        'Tüm masaüstü programlarının kullandığı mesaj yolu.',
     "The package's services are stopped briefly during the move. Close the application if it is open.":
         'Taşıma sırasında paketin servisleri kısa süre durdurulur. Uygulama açıksa kapatın.',
     'The pacman database is locked: another package operation may be running.':
         'pacman veritabanı kilitli: başka bir paket işlemi çalışıyor olabilir.',
     'The selection contains SSH/GPG private keys. The profile file is not encrypted; keep it somewhere safe.':
         'Seçimde SSH/GPG gizli anahtarları var. Profil dosyası şifrelenmez; güvenli bir yerde saklayın.',
+    'The session manager.':
+        'Oturum yöneticisi.',
     "The startup entry '{name}' will be moved to the Trash.":
         "'{name}' başlangıç girdisi Çöp Kutusu'na taşınacak.",
     'The target filesystem ({fs}) does not support Linux permissions. Use a disk formatted as ext4, btrfs or xfs.':
@@ -985,6 +1021,8 @@ MESSAGES = {
         'İşlem başarısız oldu (çıkış kodu {code}). Ayrıntılar için günlüğe bakın.',
     'The task was cancelled.':
         'İşlem iptal edildi.',
+    'The window manager and compositor.':
+        'Pencere yöneticisi ve kompozitör.',
     'Theme':
         'Tema',
     'There is no relocation record for {package}.':
@@ -1033,6 +1071,8 @@ MESSAGES = {
         'Birim dosyası: {name}',
     'Unknown source.':
         'Bilinmeyen kaynak.',
+    'Unlocks your KDE wallet at login; saved passwords may be asked for again.':
+        'KDE cüzdanınızı oturum açılışında açar; kayıtlı parolalar tekrar sorulabilir.',
     'Unmask':
         'Maskeyi kaldır',
     'Up to date (local build)':
@@ -1069,8 +1109,12 @@ MESSAGES = {
         'Önce uygulama listesinin yüklenmesini bekleyin.',
     'Web':
         'Web',
+    'Without it, programs cannot ask for your administrator password.':
+        'Bu olmadan programlar yönetici parolanızı soramaz.',
     'You are not authorised to do this (polkit denied it).':
         'Bu işlem için yetkiniz yok (polkit reddetti).',
+    'You can switch it back on at any time.':
+        'İstediğiniz zaman tekrar açabilirsiniz.',
     'Your existing files are backed up first (~/.local/share/linux-manager-pro/backups).':
         'Mevcut dosyalarınız önce yedeklenir (~/.local/share/linux-manager-pro/backups).',
     'Your previous files were backed up: {path}':
@@ -1149,6 +1193,8 @@ MESSAGES = {
         '{name} taşındı.',
     '{name} will no longer run at login.':
         '{name} açılışta çalışmayacak.',
+    '{name} will no longer run at login. It keeps running until you close it or log out.':
+        '{name} artık oturum açılışında çalışmayacak. Siz kapatana veya oturumu kapatana kadar çalışmaya devam eder.',
     '{name} will now run at login.':
         '{name} açılışta çalışacak.',
     '{name}: {n} movable folder, {size} in total':
@@ -1219,10 +1265,12 @@ MESSAGES = {
         '{n} program yeniden açıldı.',
     '{n} programs will no longer start at login.':
         '{n} program artık oturum açılışında başlamayacak.',
-    '{n} programs you switched off here are still started by services of your desktop (marked below). Switching off their startup entries does not stop those services yet.':
-        '{n} program burada kapalı ama masaüstünün servisleri tarafından hâlâ başlatılıyor (aşağıda işaretli). Başlangıç girdilerini kapatmak bu servisleri henüz durdurmaz.',
+    '{n} programs you switched off here are still started by services of your desktop (marked below). Use “Block service” on their rows to stop those services from starting at login.':
+        '{n} program burada kapalı ama masaüstünün servisleri tarafından hâlâ başlatılıyor (aşağıda işaretli). Bu servislerin açılışta başlamasını durdurmak için satırlarındaki “Servisi engelle” düğmesini kullanın.',
     '{n} services':
         '{n} servis',
+    '{n} services turned back on.':
+        '{n} servis yeniden açıldı.',
     '{n} system item(s) will be deleted permanently (password required).':
         '{n} sistem öğesi kalıcı olarak silinecek (parola gerekir).',
     '{n} user item(s) ({size}) {where}.':
@@ -1267,6 +1315,10 @@ MESSAGES = {
         '{title}  ·  {mount}  ·  {free} boş',
     '{title} is formatted as {fs}. Flatpak works best on ext4/btrfs/xfs; apps may not run on this disk.':
         '{title} {fs} biçimli. Flatpak en iyi ext4/btrfs/xfs üzerinde çalışır; bu diskte uygulamalar çalışmayabilir.',
+    '{unit} cannot be switched off from here.':
+        '{unit} buradan kapatılamaz.',
+    '{unit} will no longer start at login.':
+        '{unit} artık oturum açılışında başlamayacak.',
     '{unit}: {action} completed.':
         '{unit}: {action} tamamlandı.',
     'Calculating folder size…':
