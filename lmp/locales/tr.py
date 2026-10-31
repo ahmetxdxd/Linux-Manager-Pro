@@ -801,6 +801,8 @@ MESSAGES = {
         'Açılışta çalıştır',
     'Running':
         'Çalışanlar',
+    'Running now':
+        'Şu an çalışıyor',
     'Running services':
         'Çalışanlar',
     'SSH (contains private keys)':
@@ -925,6 +927,8 @@ MESSAGES = {
         'Duruyor',
     'Stopping service: {s}':
         'Servis durduruluyor: {s}',
+    'Switched off here, but {unit} still starts it.':
+        'Burada kapalı, ama {unit} yine de başlatıyor.',
     'System':
         'Sistem',
     'System cache':
@@ -945,6 +949,8 @@ MESSAGES = {
         'Sistem günlüğü',
     'System manager · v{version}':
         'Sistem yöneticisi · v{version}',
+    'System service':
+        'Sistem servisi',
     'System services':
         'Sistem servisleri',
     'Tag: {tag}':
@@ -993,8 +999,12 @@ MESSAGES = {
         'Bu klasör zaten taşınmış.',
     'This location cannot be moved: {d}':
         'Bu konum taşınamaz: {d}',
+    'This program is also started by a systemd service of your desktop. Switching off its startup entry does not stop that service.':
+        'Bu program, masaüstünün bir systemd servisi tarafından da başlatılıyor. Başlangıç girdisini kapatmak o servisi durdurmaz.',
     'This system does not look Arch-based. For now Linux Manager Pro only works fully on Arch and its derivatives (CachyOS, EndeavourOS, Manjaro…); features that need pacman will be disabled.':
         'Bu sistem Arch tabanlı görünmüyor. Linux Manager Pro şimdilik yalnızca Arch ve türevlerinde (CachyOS, EndeavourOS, Manjaro…) tam çalışır; pacman gerektiren özellikler devre dışı kalacak.',
+    'This system service cannot be switched off from here.':
+        'Bu sistem servisi buradan kapatılamaz.',
     'Threads':
         'İş parçacığı',
     'Tick the apps to remove first.':
@@ -1209,6 +1219,8 @@ MESSAGES = {
         '{n} program yeniden açıldı.',
     '{n} programs will no longer start at login.':
         '{n} program artık oturum açılışında başlamayacak.',
+    '{n} programs you switched off here are still started by services of your desktop (marked below). Switching off their startup entries does not stop those services yet.':
+        '{n} program burada kapalı ama masaüstünün servisleri tarafından hâlâ başlatılıyor (aşağıda işaretli). Başlangıç girdilerini kapatmak bu servisleri henüz durdurmaz.',
     '{n} services':
         '{n} servis',
     '{n} system item(s) will be deleted permanently (password required).':

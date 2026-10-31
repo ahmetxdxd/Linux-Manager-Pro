@@ -195,16 +195,18 @@ class ToggleSwitch(QAbstractButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         on_color, off_color = QColor(p.accent), QColor(p.border)
-        if not self.isEnabled():
-            on_color.setAlpha(110)
         track = QColor(
             int(off_color.red() + (on_color.red() - off_color.red()) * self._pos),
             int(off_color.green() + (on_color.green() - off_color.green()) * self._pos),
             int(off_color.blue() + (on_color.blue() - off_color.blue()) * self._pos))
+        knob = QColor("#ffffff")
+        if not self.isEnabled():
+            track.setAlpha(90)
+            knob.setAlpha(140)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(track)
         painter.drawRoundedRect(QRectF(0, 0, 40, 22), 11, 11)
-        painter.setBrush(QColor("#ffffff"))
+        painter.setBrush(knob)
         x = 3 + self._pos * 18
         painter.drawEllipse(QRectF(x, 3, 16, 16))
         painter.end()

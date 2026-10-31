@@ -4,10 +4,11 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from lmp.core import autostart
-from lmp.core.util import data_dir
+from lmp.core.util import CmdResult, data_dir
 
 
 class AutostartTests(unittest.TestCase):
@@ -117,3 +118,258 @@ class StartupSourcesTests(unittest.TestCase):
     def test_wm_command_name(self):
         self.assertEqual(autostart.wm_command_name("uwsm app -- firefox --x"), "firefox")
         self.assertEqual(autostart.wm_command_name("--no-startup-id nm-applet"), "nm-applet")
+
+
+SHOW_TARGETS = """Id=default.target
+Requires=basic.target
+Wants=psd.service lmp-autostart-guard.path
+
+Id=graphical-session.target
+Requires=basic.target
+Wants=perch.service graphical-session-pre.target
+
+Id=plasma-workspace.target
+Requires=plasma-core.target
+Wants=plasma-kaccess.service plasma-powerdevil.service xdg-desktop-autostart.target
+"""
+
+SHOW_UNITS = """Id=plasma-kaccess.service
+Description=KAccess
+LoadState=loaded
+ActiveState=active
+SubState=running
+FragmentPath=/usr/lib/systemd/user/plasma-kaccess.service
+
+Id=plasma-powerdevil.service
+Description=Powerdevil
+LoadState=loaded
+ActiveState=inactive
+SubState=dead
+FragmentPath=/usr/lib/systemd/user/plasma-powerdevil.service
+
+Id=psd.service
+Description=Profile-sync-daemon
+LoadState=loaded
+ActiveState=active
+SubState=running
+FragmentPath=/usr/lib/systemd/user/psd.service
+
+Id=perch.service
+Description=Perch
+LoadState=loaded
+ActiveState=active
+SubState=running
+FragmentPath=/home/x/.config/systemd/user/perch.service
+
+Id=arch-update.timer
+Description=Arch update check
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+FragmentPath=/etc/systemd/user/arch-update.timer
+
+Id=xdg-user-dirs.service
+Description=User folders update
+LoadState=loaded
+ActiveState=active
+SubState=exited
+FragmentPath=/etc/systemd/user/xdg-user-dirs.service
+"""
+
+UNIT_FILES = """arch-update.timer      enabled enabled
+xdg-user-dirs.service  enabled enabled
+lmp-autostart-guard.path enabled enabled
+"""
+
+
+def _proc(comm, unit, *names):
+    return autostart.ProcInfo(comm=comm, names=frozenset({comm, *names}), unit=unit,
+                              cgroup=f"/user.slice/{unit}")
+
+
+class RuntimeTests(unittest.TestCase):
+    """What is really running; read-only, so systemctl and /proc are faked."""
+
+    def setUp(self):
+        shutil.rmtree(autostart.user_dir(), ignore_errors=True)
+        autostart._blocked_path().unlink(missing_ok=True)
+        (data_dir() / "autostart-disabled.json").unlink(missing_ok=True)
+        (data_dir() / "autostart-services.json").unlink(missing_ok=True)
+        self.empty = Path(tempfile.mkdtemp())
+        os.environ["XDG_CONFIG_DIRS"] = str(self.empty)      # no /etc/xdg entries
+        self.addCleanup(os.environ.pop, "XDG_CONFIG_DIRS", None)
+
+    def _snapshot(self, procs=(), pulled=None, units=None):
+        return autostart.Snapshot(units=units or {}, pulled_by=pulled or {}, procs=list(procs))
+
+    def test_unit_names(self):
+        self.assertEqual(autostart.app_unit_name("org.kde.kdeconnect.daemon.desktop"),
+                         "app-org.kde.kdeconnect.daemon@autostart.service")
+        self.assertEqual(autostart.app_unit_name("gnome-keyring-pkcs11.desktop"),
+                         "app-gnome\\x2dkeyring\\x2dpkcs11@autostart.service")
+
+    def test_parse_show(self):
+        data = autostart.parse_show(SHOW_UNITS)
+        self.assertEqual(data["plasma-kaccess.service"]["Description"], "KAccess")
+        self.assertEqual(data["arch-update.timer"]["SubState"], "waiting")
+        self.assertEqual(len(data), 6)
+        self.assertEqual(autostart.parse_show(""), {})
+
+    def test_item_binary(self):
+        self.assertEqual(autostart._item_binary("kaccess"), "kaccess")
+        self.assertEqual(autostart._item_binary("/usr/lib/org_kde_powerdevil"), "org_kde_powerdevil")
+        self.assertEqual(autostart._item_binary('/bin/sh -c "sleep 3 && arch-update --tray"'),
+                         "arch-update")
+        self.assertEqual(autostart._item_binary("sh -c 'sleep 5; exec foo --x'"), "foo")
+        self.assertEqual(autostart._item_binary("flatpak run com.x.Y"), "com.x.Y")
+        # a bare shell or interpreter says nothing about which program it is
+        self.assertEqual(autostart._item_binary("sh -c 'sleep 5'"), "")
+        self.assertEqual(autostart._item_binary("bash"), "")
+        self.assertEqual(autostart._item_binary("env"), "")
+
+    def test_scan_processes(self):
+        root = Path(tempfile.mkdtemp())
+        proc = root / "4242"
+        proc.mkdir()
+        (proc / "comm").write_text("org_kde_powerde\n")        # cut at 15 characters
+        (proc / "cmdline").write_bytes(b"/usr/lib/org_kde_powerdevil\0")
+        (proc / "cgroup").write_text(
+            "0::/user.slice/user-1000.slice/user@1000.service/background.slice/"
+            "plasma-powerdevil.service\n")
+        os.symlink("/usr/lib/org_kde_powerdevil", proc / "exe")
+        script = root / "4343"
+        script.mkdir()
+        (script / "comm").write_text("python3\n")
+        (script / "cmdline").write_bytes(b"/usr/bin/python3\0/opt/app/tray.py\0")
+        (script / "cgroup").write_text("0::/user.slice/user-1000.slice/session-3.scope\n")
+        os.symlink("/usr/bin/python3", script / "exe")
+        (root / "self").mkdir()                                 # not a pid
+        (root / "9999").mkdir()                                 # vanished: no files inside
+
+        snap = autostart.Snapshot({}, {"plasma-powerdevil.service": "plasma-workspace.target"},
+                                  autostart.scan_processes(root))
+        self.assertEqual(len(snap.procs), 2)
+        found = snap.find_process("org_kde_powerdevil")         # full name, though comm is cut
+        self.assertEqual(found.unit, "plasma-powerdevil.service")
+        self.assertEqual(snap.find_process("tray.py").unit, "session-3.scope")
+        self.assertIsNone(snap.find_process("kaccess"))
+        self.assertIsNone(snap.find_process(""))
+
+    def test_take_snapshot_reads_systemctl(self):
+        def fake_run(cmd, **_kw):
+            cmd = list(cmd)
+            if "list-unit-files" in cmd:
+                return CmdResult(0, UNIT_FILES, "")
+            if "default.target" in cmd:
+                return CmdResult(0, SHOW_TARGETS, "")
+            return CmdResult(0, SHOW_UNITS, "")
+        with mock.patch.object(autostart, "run", fake_run):
+            snap = autostart.take_snapshot(proc_root=self.empty)
+        self.assertEqual(snap.pulled_by["plasma-kaccess.service"], "plasma-workspace.target")
+        self.assertEqual(snap.pulled_by["psd.service"], "default.target")
+        self.assertEqual(snap.pulled_by["arch-update.timer"], "enabled")
+        self.assertNotIn("graphical-session-pre.target", snap.pulled_by)    # not a service
+        self.assertNotIn("xdg-desktop-autostart.target", snap.pulled_by)
+        self.assertNotIn("lmp-autostart-guard.path", snap.pulled_by)        # our own guard
+        self.assertTrue(snap.units["plasma-kaccess.service"].running)
+        self.assertFalse(snap.units["plasma-powerdevil.service"].running)
+        self.assertFalse(snap.units["xdg-user-dirs.service"].running)       # finished one-shot
+
+    def test_systemd_unavailable_is_not_an_error(self):
+        gone = CmdResult(127, "", "systemctl: command not found")
+        with mock.patch.object(autostart, "run", lambda *a, **k: gone):
+            snap = autostart.take_snapshot(proc_root=self.empty)
+        self.assertEqual((snap.units, snap.pulled_by, snap.procs), ({}, {}, []))
+        autostart.add_item("Chat", "chat-app")
+        items = autostart.inspect_items(autostart.list_items(), snap)
+        self.assertEqual([i.name for i in items], ["Chat"])
+        self.assertFalse(items[0].running)
+
+    def test_switched_off_entry_still_started_by_a_session_service(self):
+        autostart.add_item("Accessibility", "kaccess")
+        autostart.add_item("Mine", "mine-app")
+        autostart.add_item("Manual", "manual-app")
+        for name in ("Accessibility", "Manual"):
+            autostart.set_enabled(next(i for i in autostart.list_items() if i.name == name), False)
+        snap = self._snapshot(
+            procs=[_proc("kaccess", "plasma-kaccess.service"),
+                   _proc("mine-app", "app-mine-app@autostart.service"),
+                   _proc("manual-app", "app-manual-app-1234.scope")],
+            pulled={"plasma-kaccess.service": "plasma-workspace.target"})
+        items = {i.name: i for i in autostart.inspect_items(autostart.list_items(), snap)}
+
+        kaccess = items["Accessibility"]
+        self.assertFalse(kaccess.enabled)
+        self.assertTrue(kaccess.running)
+        self.assertEqual(kaccess.runner, "plasma-kaccess.service")
+        self.assertTrue(kaccess.other_start)
+
+        manual = items["Manual"]            # off, running because the user started it by hand
+        self.assertTrue(manual.running)
+        self.assertFalse(manual.other_start)
+
+        mine = items["Mine"]                # on, running as it should
+        self.assertTrue(mine.running)
+        self.assertFalse(mine.other_start)
+
+    def test_entry_running_through_its_own_autostart_unit(self):
+        autostart.add_item("Chat", "chat-app")
+        item = autostart.list_items()[0]
+        own = autostart.app_unit_name(item.desktop_id)
+        snap = self._snapshot(units={own: autostart.UnitInfo(own, load="loaded", active="active",
+                                                             sub="running")})
+        item = autostart.inspect_items([item], snap)[0]
+        self.assertTrue(item.running)
+        self.assertEqual(item.runner, own)
+        self.assertFalse(item.other_start)
+
+    def test_unknown_program_is_not_reported(self):
+        autostart.add_item("Wrapper", "sh -c 'sleep 5'")
+        snap = self._snapshot(procs=[_proc("sh", "session-1.scope")])
+        item = autostart.inspect_items(autostart.list_items(), snap)[0]
+        self.assertIsNone(item.running)           # cannot tell, so say nothing
+        self.assertFalse(item.other_start)
+
+    def test_session_services_are_listed_read_only(self):
+        wants = systemd_wants = autostart.systemd_user_dir() / "default.target.wants"
+        wants.mkdir(parents=True, exist_ok=True)
+        (autostart.systemd_user_dir() / "mine.service").write_text("[Unit]\nDescription=Mine\n")
+        (wants / "mine.service").symlink_to(autostart.systemd_user_dir() / "mine.service")
+        self.addCleanup(shutil.rmtree, autostart.systemd_user_dir(), ignore_errors=True)
+        self.assertTrue(systemd_wants.is_dir())
+
+        units = autostart.parse_show(SHOW_UNITS)
+        info = {n: autostart.UnitInfo(n, p["Description"], p["LoadState"], p["ActiveState"],
+                                      p["SubState"], p["FragmentPath"]) for n, p in units.items()}
+        info["mine.service"] = autostart.UnitInfo("mine.service", "Mine", "loaded", "active",
+                                                  "running")
+        pulled = {"plasma-kaccess.service": "plasma-workspace.target",
+                  "plasma-powerdevil.service": "plasma-workspace.target",
+                  "mine.service": "default.target", "gone.service": "default.target"}
+        snap = self._snapshot(units=info, pulled=pulled)
+        items = autostart.inspect_items(autostart.list_items(), snap)
+        services = {i.desktop_id: i for i in items if i.kind == autostart.SERVICE}
+
+        self.assertEqual(sorted(services),
+                         ["mine.service", "plasma-kaccess.service", "plasma-powerdevil.service"])
+        self.assertFalse(services["mine.service"].readonly)        # the user's own: still switchable
+        self.assertTrue(services["mine.service"].running)
+        kaccess = services["plasma-kaccess.service"]               # not duplicated, not switchable
+        self.assertTrue(kaccess.readonly)
+        self.assertTrue(kaccess.enabled)
+        self.assertTrue(kaccess.running)
+        self.assertEqual(kaccess.name, "KAccess")
+        self.assertEqual(kaccess.origin, "system")
+        self.assertFalse(services["plasma-powerdevil.service"].running)
+        with self.assertRaises(PermissionError):
+            autostart.set_enabled(kaccess, False)
+
+    def test_disable_all_ignores_system_services(self):
+        autostart.add_item("Mine", "mine-app")
+        units = {"plasma-kaccess.service": autostart.UnitInfo(
+            "plasma-kaccess.service", "KAccess", "loaded", "active", "running",
+            "/usr/lib/systemd/user/plasma-kaccess.service")}
+        snap = self._snapshot(units=units, pulled={"plasma-kaccess.service": "plasma-workspace.target"})
+        items = autostart.inspect_items(autostart.list_items(), snap)
+        self.assertEqual(autostart.disable_all(items), [autostart.list_items()[0].desktop_id])
+        self.assertTrue(next(i for i in items if i.readonly).enabled)

@@ -63,11 +63,15 @@ class AutostartItem:
     desktop_mismatch: bool = False   # will not run on this desktop (OnlyShowIn, other WM…)
     kind: str = APP
     source: str = ""            # what to show as the origin (e.g. "hyprland.conf")
+    readonly: bool = False      # found by `inspect_items()`; cannot be switched here
+    running: bool | None = None  # None = not checked / unknown
+    runner: str = ""            # systemd unit (or scope) the running program belongs to
+    other_start: bool = False   # running through a session service, not its own autostart entry
 
     @property
     def origin_label(self) -> str:
         if self.kind == SERVICE:
-            return tr("Background service")
+            return tr("System service") if self.origin == "system" else tr("Background service")
         if self.kind == WM:
             return self.source
         return tr("User") if self.origin == "user" else tr("System")
@@ -321,15 +325,21 @@ def xdg_entries_run_here() -> bool:
 # Combined API
 # --------------------------------------------------------------------------- #
 
-def list_items() -> list[AutostartItem]:
-    desktops = current_desktops()
-    items = _app_items(desktops) + _service_items() + _wm_items(desktops)
+def _sorted(items: list[AutostartItem]) -> list[AutostartItem]:
     order = {APP: 0, WM: 1, SERVICE: 2}
     return sorted(items, key=lambda i: (order[i.kind], i.kind == APP and i.origin != "user",
                                         i.name.lower()))
 
 
+def list_items() -> list[AutostartItem]:
+    """Everything configured to start, read from files only (no system queries)."""
+    desktops = current_desktops()
+    return _sorted(_app_items(desktops) + _service_items() + _wm_items(desktops))
+
+
 def set_enabled(item: AutostartItem, enabled: bool) -> None:
+    if item.readonly:
+        raise PermissionError(tr("This system service cannot be switched off from here."))
     if item.kind == SERVICE:
         _set_service_enabled(item, enabled)
     elif item.kind == WM:
@@ -567,6 +577,269 @@ def sync_guard() -> bool:
         run(["systemctl", "--user", "daemon-reload"], timeout=20)
         run(["systemctl", "--user", "enable", "--now", path_unit.name], timeout=20)
     return True
+
+
+# --------------------------------------------------------------------------- #
+# What is really running, and what else starts at login
+#
+# An entry switched off above only disables its own .desktop file. The same program may be
+# started by a systemd user service that the desktop pulls in itself (Plasma 6 starts kaccess,
+# powerdevil, the polkit agent… as `plasma-*.service` through plasma-workspace.target). The
+# functions below look at the running system (read-only) to show that.
+# --------------------------------------------------------------------------- #
+
+# Targets whose Wants=/Requires= list the units the session starts by itself. plasma-core.target
+# (the shell and the compositor) is left out on purpose.
+SESSION_TARGETS = ("default.target", "graphical-session.target", "plasma-workspace.target")
+_UNIT_TYPES = (".service", ".timer", ".path")
+_SHELLS = {"sh", "bash", "dash", "zsh", "fish"}
+_GENERIC = _SHELLS | {"env", "python", "python3", "perl", "ruby", "node", "java", "sleep",
+                      "nohup", "setsid", "systemd-run", "dbus-launch", "dbus-run-session",
+                      "gtk-launch", "xdg-open"}
+_INTERPRETERS = _SHELLS | {"python", "python3", "perl", "ruby", "node", "java"}
+
+
+@dataclass
+class UnitInfo:
+    name: str
+    description: str = ""
+    load: str = ""
+    active: str = ""
+    sub: str = ""
+    fragment: str = ""
+
+    @property
+    def running(self) -> bool:
+        """Active and still doing something (a finished one-shot service is not 'running')."""
+        return self.active in ("active", "activating", "reloading") and self.sub != "exited"
+
+
+@dataclass
+class ProcInfo:
+    comm: str                    # /proc/<pid>/comm (the kernel cuts it at 15 characters)
+    names: frozenset[str]        # comm, argv[0], the executable and (for scripts) the script
+    unit: str                    # systemd unit/scope the process lives in ("" = unknown)
+    cgroup: str
+
+
+@dataclass
+class Snapshot:
+    units: dict[str, UnitInfo]
+    pulled_by: dict[str, str]    # unit → session target (or "enabled") that starts it at login
+    procs: list[ProcInfo]
+
+    def is_session_unit(self, unit: str) -> bool:
+        return unit in self.pulled_by and not unit.startswith("app-")
+
+    def find_process(self, binary: str) -> ProcInfo | None:
+        if not binary:
+            return None
+        is_app_id = "." in binary and "/" not in binary          # flatpak application id
+        found = []
+        for p in self.procs:
+            if (binary in p.names or (len(binary) > 15 and binary[:15] == p.comm)
+                    or (is_app_id and f"flatpak-{binary}" in p.cgroup)):
+                found.append(p)
+        # prefer a match that belongs to a session service: that is the one that explains
+        # why a program keeps starting
+        return next((p for p in found if self.is_session_unit(p.unit)), found[0] if found else None)
+
+
+def _unit_escape(text: str) -> str:
+    """Same as `systemd-escape`."""
+    out = []
+    for i, ch in enumerate(text):
+        if ch == "/":
+            out.append("-")
+        elif ch.isascii() and (ch.isalnum() or ch in ":_" or (ch == "." and i > 0)):
+            out.append(ch)
+        else:
+            out.append("".join(f"\\x{b:02x}" for b in ch.encode("utf-8")))
+    return "".join(out)
+
+
+def app_unit_name(desktop_id: str) -> str:
+    """The unit systemd's xdg-autostart generator makes for an autostart entry."""
+    stem = desktop_id[:-len(".desktop")] if desktop_id.endswith(".desktop") else desktop_id
+    return f"app-{_unit_escape(stem)}@autostart.service"
+
+
+def parse_show(text: str) -> dict[str, dict[str, str]]:
+    """`systemctl show a b c` output → {unit id: {property: value}}."""
+    out: dict[str, dict[str, str]] = {}
+    for block in re.split(r"\n\s*\n", text.strip()):
+        props = {}
+        for line in block.splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                props[key] = value
+        if props.get("Id"):
+            out[props["Id"]] = props
+    return out
+
+
+def _startable(unit: str) -> bool:
+    return (unit.endswith(_UNIT_TYPES) and not unit.startswith(GUARD_UNIT)
+            and not unit.startswith("app-"))
+
+
+def _cgroup_unit(path: str) -> str:
+    """Nearest systemd unit/scope in a cgroup path (not the user manager itself)."""
+    for part in reversed(path.strip("/").split("/")):
+        if part.endswith((".service", ".scope")) and not part.startswith("user@") \
+                and part != "init.scope":
+            return part
+    return ""
+
+
+def scan_processes(proc_root: Path | str = "/proc") -> list[ProcInfo]:
+    """The current user's processes. Never raises: processes that vanish are skipped."""
+    root = Path(proc_root)
+    uid = os.getuid()
+    out = []
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return out
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != uid:
+                continue
+            comm = (entry / "comm").read_text(errors="replace").strip()
+            argv = [a.decode(errors="replace") for a in (entry / "cmdline").read_bytes().split(b"\0") if a]
+            cgroup = (entry / "cgroup").read_text(errors="replace")
+        except OSError:
+            continue
+        try:
+            exe = os.path.basename(os.readlink(entry / "exe")).removesuffix(" (deleted)")
+        except OSError:
+            exe = ""
+        names = {comm, exe} - {""}
+        if argv:
+            names.add(os.path.basename(argv[0].split(" ")[0]))
+            if (exe in _INTERPRETERS or exe.startswith("python")) and len(argv) > 1 \
+                    and not argv[1].startswith("-"):
+                names.add(os.path.basename(argv[1]))      # a script run by its interpreter
+        path = ""
+        for line in cgroup.splitlines():
+            if line.startswith("0::") or "name=systemd" in line:
+                path = line.split(":", 2)[-1]
+                break
+        out.append(ProcInfo(comm=comm, names=frozenset(names), unit=_cgroup_unit(path),
+                            cgroup=path))
+    return out
+
+
+def take_snapshot(extra_units=(), proc_root: Path | str = "/proc") -> Snapshot:
+    """Asks systemd which units the session starts and what state some units are in. A missing
+    or unreachable systemd just gives an empty answer."""
+    pulled_by: dict[str, str] = {}
+    res = run(["systemctl", "--user", "show", "-p", "Id", "-p", "Wants", "-p", "Requires",
+               *SESSION_TARGETS], timeout=20)
+    if res.ok:
+        for target, props in parse_show(res.out).items():
+            for unit in f"{props.get('Wants', '')} {props.get('Requires', '')}".split():
+                if _startable(unit):
+                    pulled_by.setdefault(unit, target)
+    res = run(["systemctl", "--user", "list-unit-files", "--state=enabled,enabled-runtime",
+               "--type=service,timer,path", "--no-legend", "--plain", "--no-pager"], timeout=20)
+    if res.ok:
+        for line in res.out.splitlines():
+            unit = line.split(None, 1)[0] if line.strip() else ""
+            if _startable(unit):
+                pulled_by.setdefault(unit, "enabled")
+
+    wanted = sorted(set(pulled_by) | set(extra_units))
+    units: dict[str, UnitInfo] = {}
+    if wanted:
+        res = run(["systemctl", "--user", "show", "-p", "Id", "-p", "Description",
+                   "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
+                   "-p", "FragmentPath", *wanted], timeout=20)
+        if res.ok:
+            for name, props in parse_show(res.out).items():
+                units[name] = UnitInfo(
+                    name=name, description=props.get("Description", ""),
+                    load=props.get("LoadState", ""), active=props.get("ActiveState", ""),
+                    sub=props.get("SubState", ""), fragment=props.get("FragmentPath", ""))
+    return Snapshot(units, pulled_by, scan_processes(proc_root))
+
+
+def _item_binary(command: str) -> str:
+    """The program an entry starts ('' when it cannot be told, e.g. a bare `sh -c`)."""
+    text = re.sub(r"^\[[^\]]*\]\s*", "", command.strip())
+    binary = desktop.exec_binary(text)
+    if binary in _SHELLS:
+        try:
+            tokens = shlex.split(text)
+        except ValueError:
+            return ""
+        if "-c" not in tokens or tokens.index("-c") + 1 >= len(tokens):
+            return ""
+        # `sleep 3 && arch-update --tray` → the last real command
+        for part in reversed(re.split(r"&&|\|\||;|\|", tokens[tokens.index("-c") + 1])):
+            inner = desktop.exec_binary(re.sub(r"^(exec|nohup|setsid)\s+", "", part.strip()))
+            if inner and inner not in _GENERIC:
+                return inner
+        return ""
+    return "" if binary in _GENERIC else binary
+
+
+def _wm_binary(command: str) -> str:
+    name = wm_command_name(command)
+    return "" if " " in name or name in _GENERIC else name
+
+
+def inspect_items(items: list[AutostartItem], snapshot: Snapshot | None = None
+                  ) -> list[AutostartItem]:
+    """Fills in what is running (`running`, `runner`, `other_start`) and adds the systemd user
+    units the session starts by itself, as read-only entries. Queries the live system, so call
+    it from a background thread."""
+    if snapshot is None:
+        extra = [app_unit_name(i.desktop_id) if i.kind == APP else i.desktop_id
+                 for i in items if i.kind in (APP, SERVICE)]
+        snapshot = take_snapshot(extra)
+    snap = snapshot
+
+    for item in items:
+        if item.kind == SERVICE:
+            info = snap.units.get(item.desktop_id)
+            if info:
+                item.running = info.running
+                item.runner = item.desktop_id if info.running else ""
+            continue
+        own = ""
+        if item.kind == APP:
+            own = app_unit_name(item.desktop_id)
+            info = snap.units.get(own)
+            if info and info.running:
+                item.running, item.runner = True, own
+                continue
+            binary = _item_binary(item.command)
+        else:
+            binary = _wm_binary(item.command)
+        proc = snap.find_process(binary)
+        item.running = proc is not None if binary else None
+        if proc:
+            item.runner = proc.unit
+            item.other_start = snap.is_session_unit(proc.unit) and proc.unit != own
+
+    known = {i.desktop_id for i in items if i.kind == SERVICE}
+    extra_items = []
+    for unit, pulled in sorted(snap.pulled_by.items()):
+        info = snap.units.get(unit)
+        if unit in known or not info or info.load != "loaded":
+            continue
+        fragment = Path(info.fragment) if info.fragment else None
+        mine = fragment is not None and systemd_user_dir() in fragment.parents
+        extra_items.append(AutostartItem(
+            desktop_id=unit, name=info.description or unit.rsplit(".", 1)[0],
+            command=unit, comment=f"{unit} · {pulled}", icon="", enabled=True,
+            origin="user" if mine else "system", user_path=None, system_path=fragment,
+            kind=SERVICE, source=pulled, readonly=True, running=info.running,
+            runner=unit if info.running else ""))
+    return _sorted(items + extra_items)
 
 
 # --------------------------------------------------------------------------- #

@@ -57,16 +57,34 @@ class AutostartRow(QWidget):
         col.setSpacing(1)
         title = label(item.name)
         title.setTextFormat(Qt.TextFormat.PlainText)
-        col.addWidget(title)
+        title.setMinimumWidth(1)        # a long name is cut, it must not push the switch away
+        title.setToolTip(item.name)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        title_row.addWidget(title)
+        if item.running:
+            running = label(tr("Running now"), "success")
+            if item.runner:
+                running.setToolTip(item.runner)
+            title_row.addWidget(running)
+        title_row.addStretch()
+        col.addLayout(title_row)
         detail = item.comment or item.command
         meta = f"{item.origin_label} · {detail}"
         if item.desktop_mismatch:
             meta += tr(" · would not run on this desktop anyway")
-        sub = label(meta, "small")
+        sub = label(meta, "small", wrap=True)
         sub.setTextFormat(Qt.TextFormat.PlainText)
         sub.setToolTip(tr("Command: {cmd}\nFile: {file}").format(
             cmd=item.command, file=item.user_path or item.system_path or item.source))
         col.addWidget(sub)
+        if item.other_start and not item.enabled:
+            via = label(tr("Switched off here, but {unit} still starts it.").format(unit=item.runner),
+                        "warning", wrap=True)
+            via.setTextFormat(Qt.TextFormat.PlainText)
+            via.setToolTip(tr("This program is also started by a systemd service of your desktop. "
+                              "Switching off its startup entry does not stop that service."))
+            col.addWidget(via)
         row.addLayout(col, 1)
         if item.kind == autostart.APP and item.origin == "user":
             row.addWidget(tool_button("uninstall", tr("Delete this entry"),
@@ -82,6 +100,9 @@ class AutostartRow(QWidget):
                                  file=item.user_path.name if item.user_path else ""),
         }
         self.switch.setToolTip(tips[item.kind])
+        if item.readonly:
+            self.switch.setEnabled(False)
+            self.switch.setToolTip(tr("This system service cannot be switched off from here."))
         self.switch.toggled.connect(lambda on: page.toggle(item, on, self.switch))
         row.addWidget(self.switch)
 
@@ -131,6 +152,9 @@ class StartupPage(Page):
                                  "warning")
         self.xdg_banner.setVisible(False)
         left.body.addWidget(self.xdg_banner)
+        self.other_banner = Banner("", "warning")
+        self.other_banner.setVisible(False)
+        left.body.addWidget(self.other_banner)
         self.show_other = QCheckBox()
         self.show_other.setVisible(False)
         self.show_other.toggled.connect(lambda _on: self._render())
@@ -171,7 +195,7 @@ class StartupPage(Page):
         def work():
             autostart.enforce_blocked()          # undo apps that switched themselves back on
             autostart.sync_guard()
-            items = autostart.list_items()
+            items = autostart.inspect_items(autostart.list_items())
             return items, autostart.xdg_entries_run_here(), bool(autostart.disabled_snapshot())
 
         run_async(work, on_done=self._show_items, key=(id(self), "items"),
@@ -196,6 +220,15 @@ class StartupPage(Page):
         self.restore_btn.setVisible(can_undo)
         self.xdg_banner.setVisible(not self._xdg_runs and any(i.kind == autostart.APP
                                                               for i in relevant))
+        still_started = sum(1 for i in relevant if i.other_start and not i.enabled)
+        self.other_banner.text.setText(
+            trn("{n} program you switched off here is still started by a service of your "
+                "desktop (marked below). Switching off its startup entry does not stop that "
+                "service yet.",
+                "{n} programs you switched off here are still started by services of your "
+                "desktop (marked below). Switching off their startup entries does not stop "
+                "those services yet.", still_started).format(n=still_started))
+        self.other_banner.setVisible(still_started > 0)
         other = len(items) - len(relevant)
         self.show_other.setText(trn("Show {n} entry that only runs on other desktops",
                                     "Show {n} entries that only run on other desktops",
